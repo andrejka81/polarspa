@@ -32,6 +32,7 @@ class Table extends stdObject{
 	protected $selectFromView=null;
 	protected $filterFields=array();
 	protected $agregates=array();
+	protected $initLinkedObjects=false;
 	
 	function __construct($name, $db_link, $tableFactory=null){
 		
@@ -103,31 +104,7 @@ class Table extends stdObject{
 			};
 			
 		}
-		
-		/*$query = "select column_name,referenced_table_name,referenced_column_name from information_schema.key_column_usage where referenced_table_name is not null and table_name = '$this->name'";
-		$result = $this->db_link->prepare($query);
-		if(!$result){
-			throw new Exception("Error: Can't get info of table ".$this->name);
-		};
-		$result->execute();
-		if($this->db_link->error){
-			throw new Exception($this->db_link->error);
-		};
-		$result->bind_result($column_name, $referenced_table_name, $referenced_column);
-		while ($result->fetch())
-		{
-			$this->fields[$column_name]['ref_table'] = $referenced_table_name;
-			$this->fields[$column_name]['ref_column'] = $referenced_column;
-			$this->{"obj_".ucfirst($column_name)} = function($stdObject) use ($column_name) {
-					if(is_null($stdObject->fields[$column_name]['ref_table'])) {throw new Exception("Error: table ".$this->name." field:".$column_name." has no foreign_key to another table.");}
-					if(is_null($stdObject->getFieldValue($column_name))){return null;}
-					$obj = $stdObject->getTable($this->fields[$column_name]['ref_table']);
-					if($obj->getById($stdObject->getFieldValue($column_name))){
-							return $obj;
-					}else{return null;}
-				};
-		}
-		*/		
+
 		$result->free_result();
 	}
 	
@@ -143,6 +120,23 @@ class Table extends stdObject{
 	function skipOnInsert($param=true){$this->onInsert=!$param;}
 	function skipOnUpdate($param=true){$this->onUpdate=!$param;}
 	function skipOnDelete($param=true){$this->onDelete=!$param;}  
+	
+	public function get_dblink(){
+	    return $this->db_link;
+	}
+	
+	public function beginTransaction(){
+		$this->db_link->autocommit(FALSE);
+	}
+	
+	public function commitTransaction(){
+		$this->db_link->commit();
+		$this->db_link->autocommit(TRUE);
+	}
+	public function rollbackTransaction(){
+		$this->db_link->rollback();
+	}
+	
 	
 	function getTableName(){
 		return $this->name;
@@ -179,6 +173,7 @@ class Table extends stdObject{
 					}else{return null;}
 				};
 		}		
+		$this->initLinkedObjects=true;
 		$result->free_result();
 	}
 	
@@ -195,7 +190,7 @@ class Table extends stdObject{
 					if(isset($field['Value'])&&($field['Name']!=$this->id)){
 						$fieldvalues[]=$field['Quotes'].$this->secureValue($field['Value']).$field['Quotes'];
 					} else{
-						$fieldvalues[]='NULL';
+							$fieldvalues[]='NULL';
 					}
 			};
 		
@@ -221,6 +216,7 @@ class Table extends stdObject{
 	
 	
 	function bulkInsert($records=array(), $commit=true){
+		
 		if(empty($records)){return;}
 		$this->db_link->autocommit(FALSE);
 		$this_saved_state = $this->getRecordAsArray();
@@ -231,12 +227,14 @@ class Table extends stdObject{
 		}		
 		try{
 			foreach($records as $rec){
-				$this->copyFieldValuesFrom($rec);
-				$this->set_Id(null);
+				$this->copyAllFieldValuesFrom($rec);
+				if($this->fields[$this->id]['Extra']=='auto_increment'){$this->set_Id(null);}
 				if($this->onInsert){$this->onInsert();}
 				$values_str[]='('.implode(",",$this->suitArrayForQuery($this->getRecordAsArray())).')';
 			}
 			$query = "INSERT INTO ".$this->name." (".implode(",", $fieldnames).") VALUES ".implode(",",$values_str);
+			
+			
 			
 			if(!$this->db_link->query($query)){
 				throw new Exception('MySQL Error:'.$this->db_link->error);
@@ -252,7 +250,8 @@ class Table extends stdObject{
 		
 	}	
 	
-	function deleteById($id, $commit=true){
+	function deleteById($id_input, $commit=true){
+		$id = $this->cleanNumber($id_input);
 		$this->db_link->autocommit(FALSE);
 		try{
 			if($this->getById($id)){
@@ -276,13 +275,18 @@ class Table extends stdObject{
 	protected function secureValue($value){
 		return $this->secureInput?$this->db_link->real_escape_string($value):$value;
 	}
+	
+	protected function cleanNumber($value){
+		return preg_replace('/[^0-9.]+/', '', $value.'.');
+	}
 	function setSecureInput($param=true){
 		$this->secureInput=$param;
 	}
 	function setRemoveTags($param=true){
 		$this->removeTags=$param;
 	}
-	function getById($id){
+	function getById($id_input){
+		$id = $this->cleanNumber($id_input);
 		$query = "SELECT * FROM ".$this->getNameForSelect()." WHERE ".$this->id."=".$this->secureValue($id)." LIMIT 1";
 		$result = $this->db_link->query($query);
 		$row = $result->fetch_assoc();
@@ -463,12 +467,16 @@ class Table extends stdObject{
 	}
 	
 	function setFilter($column, $filterType, $filterValue1=null, $filterValue2=''){
-		if(!isset($this->fields[$column])){
+		$quotes='';
+        if(!isset($this->fields[$column])){
 				if(!isset($this->selectFromView))
 				return;
 				if(!isset($this->fieldsView[$column]))
 				return;
-		};
+                $quotes = $this->getQuotes($this->fieldsView[$column]['Type']);
+		}else{
+                $quotes = $this->getQuotes($this->fields[$column]['Type']);
+        };
 		$columnQuoted = $this->getQuotedFieldName($column);				
 		switch(strtoupper($filterType)){
 			case 'IS NULL':
@@ -481,33 +489,33 @@ class Table extends stdObject{
 		
 		switch(strtoupper($filterType)){
 			case '=':
-						$this->filters[]= ' '.$columnQuoted.'='.$this->getQuotes($this->fields[$column]['Type']).$this->secureValue($filterValue1).$this->getQuotes($this->fields[$column]['Type']).' ';
+						$this->filters[]= ' '.$columnQuoted.'='.$quotes.$this->secureValue($filterValue1).$quotes.' ';
 						break;
 			case '>':
-						$this->filters[]= ' '.$columnQuoted.'>'.$this->getQuotes($this->fields[$column]['Type']).$this->secureValue($filterValue1).$this->getQuotes($this->fields[$column]['Type']).' ';
+						$this->filters[]= ' '.$columnQuoted.'>'.$quotes.$this->secureValue($filterValue1).$quotes.' ';
 						break;
 			case '>=':
-						$this->filters[]= ' '.$columnQuoted.'>='.$this->getQuotes($this->fields[$column]['Type']).$this->secureValue($filterValue1).$this->getQuotes($this->fields[$column]['Type']).' ';
+						$this->filters[]= ' '.$columnQuoted.'>='.$quotes.$this->secureValue($filterValue1).$quotes.' ';
 						break;
 			case '<':
-						$this->filters[]= ' '.$columnQuoted.'<'.$this->getQuotes($this->fields[$column]['Type']).$this->secureValue($filterValue1).$this->getQuotes($this->fields[$column]['Type']).' ';
+						$this->filters[]= ' '.$columnQuoted.'<'.$quotes.$this->secureValue($filterValue1).$quotes.' ';
 						break;
 			case '<=':
-						$this->filters[]= ' '.$columnQuoted.'<='.$this->getQuotes($this->fields[$column]['Type']).$this->secureValue($filterValue1).$this->getQuotes($this->fields[$column]['Type']).' ';
+						$this->filters[]= ' '.$columnQuoted.'<='.$quotes.$this->secureValue($filterValue1).$quotes.' ';
 						break;
 			case '<>':
-						$this->filters[]= ' '.$columnQuoted.'<>'.$this->getQuotes($this->fields[$column]['Type']).$this->secureValue($filterValue1).$this->getQuotes($this->fields[$column]['Type']).' ';
+						$this->filters[]= ' '.$columnQuoted.'<>'.$quotes.$this->secureValue($filterValue1).$quotes.' ';
 						break;
 			case 'BETWEEN':
 					if($filterValue2!=''){
-						$this->filters[]= ' ('.$columnQuoted.'>='.$this->getQuotes($this->fields[$column]['Type']).$this->secureValue($filterValue1).$this->getQuotes($this->fields[$column]['Type']).' AND '
-						.$columnQuoted.'<='.$this->getQuotes($this->fields[$column]['Type']).$this->secureValue($filterValue2).$this->getQuotes($this->fields[$column]['Type']).') ';
+						$this->filters[]= ' ('.$columnQuoted.'>='.$quotes.$this->secureValue($filterValue1).$quotes.' AND '
+						.$columnQuoted.'<='.$quotes.$this->secureValue($filterValue2).$quotes.') ';
 					};
 						break;
 			case 'NOT BETWEEN':
 					if($filterValue2!=''){
-						$this->filters[]= ' NOT ('.$columnQuoted.'>='.$this->getQuotes($this->fields[$column]['Type']).$this->secureValue($filterValue1).$this->getQuotes($this->fields[$column]['Type']).' AND '
-						.$columnQuoted.'<='.$this->getQuotes($this->fields[$column]['Type']).$this->secureValue($filterValue2).$this->getQuotes($this->fields[$column]['Type']).') ';
+						$this->filters[]= ' NOT ('.$columnQuoted.'>='.$quotes.$this->secureValue($filterValue1).$quotes.' AND '
+						.$columnQuoted.'<='.$quotes.$this->secureValue($filterValue2).$quotes.') ';
 					};
 						break;			
 			case 'IN':
@@ -521,7 +529,7 @@ class Table extends stdObject{
 						$tmp = array();
 						
 						foreach($filterValue1 as $value){
-							$tmp[] = $this->getQuotes($this->fields[$column]['Type']).$this->secureValue($value).$this->getQuotes($this->fields[$column]['Type']);
+							$tmp[] = $quotes.$this->secureValue($value).$quotes;
 						};
 					$this->filters[]=' '.$columnQuoted.' '.strtoupper($filterType).' ('.implode(",",$tmp).') ';					
 					
@@ -689,7 +697,7 @@ class Table extends stdObject{
 		}elseif(is_array($copyFrom)){
 			foreach($this->fields as $field){
 				if(isset($copyFrom[$field['Name']])){
-					$this->setFieldValue($field['Name'],$copyFrom[$field['Name']]['Value']);
+					$this->setFieldValue($field['Name'],$copyFrom[$field['Name']]);
 				}
 			}
 		}
@@ -730,7 +738,7 @@ class Table extends stdObject{
 		
 		foreach($this->fields as $field){
 			if(isset($inputArray[$field['Name']])){
-				$inputArray[$field['Name']]=$field['Quotes'].$inputArray[$field['Name']].$field['Quotes'];
+				$inputArray[$field['Name']]=$field['Quotes'].$this->secureValue($inputArray[$field['Name']]).$field['Quotes'];
 			}
 			if(is_null($inputArray[$field['Name']])){$inputArray[$field['Name']]='NULL';}
 		}
@@ -801,13 +809,15 @@ class Table extends stdObject{
 	protected function getTable($tableName){
 		try{
 			if(!is_null($this->tF)){
-				return $this->tF->buildTable($tableName, $this->db_link, $this->tF);
+				$table = $this->tF->buildTable($tableName, $this->db_link, $this->tF);
+				if($this->initLinkedObjects){$table->initLinkedObjects();}
+				return $table;
 			}else{return null;}	
 		} catch (Exception $e){
 			throw new Exception('Error getting table '.$tableName.' in function getTable in table class '.get_class($this).' : '.$e->getMessage());
 		} 
 	}
-	
+	/*
 	protected function getClass($className){
 		if(is_null($className)||($className=='')) return null;
 		try{
@@ -818,7 +828,7 @@ class Table extends stdObject{
 		}
 		
 	}
-	
+	*/
 	function initVirtualField($virtualField,$vFieldSettings){
 		
 		$this->virtualFields[$virtualField]=$vFieldSettings;
