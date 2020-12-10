@@ -15,4 +15,4 @@ Password will be set to 123456
 If you already have jqwidgets files (https://www.jqwidgets.com/download/) and want them local,
 then put them in jqwidgets folder and setup templates (/panel/forms/templates)
 
-Open page /panel/index.php in your browser (except firefox) login as admin with password 123456
+Open page http://example.com/panel/index.php in your browser (except firefox) login as admin with password 123456
