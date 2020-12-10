@@ -7,7 +7,7 @@ Install
 
 Put repository to your hosting or local server with Apache and Mysql(MariaDB).
 Create database from demo dump.
-Change db settings in /panel/modules/data/connect.php
+Change db settings in /panel/modules/data/connect.php .
 Change admin hash password in table sys_users to any of demo users. 
 Password will be set to 123456
 
